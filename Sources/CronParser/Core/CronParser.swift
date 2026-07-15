@@ -42,8 +42,10 @@ public enum CronParser {
             return Result(fields: fields, description: "", nextRuns: [], error: "Couldn't parse one of the fields.")
         }
         let weekdays = Set(weekdaysRaw.map { $0 == 7 ? 0 : $0 })   // both 0 and 7 mean Sunday
+        // Vixie/cronie treat a day field as "unrestricted" whenever its text STARTS
+        // with '*' (so "*/2" keeps AND combination, like the real daemon).
         let runs = nextRuns(minutes, hours, days, months, weekdays,
-                            domRestricted: parts[2] != "*", dowRestricted: parts[4] != "*",
+                            domRestricted: !parts[2].hasPrefix("*"), dowRestricted: !parts[4].hasPrefix("*"),
                             now: now, cal: calendar, count: 5)
         return Result(fields: fields, description: describe(parts), nextRuns: runs, error: nil)
     }
@@ -83,17 +85,24 @@ public enum CronParser {
         var comps = cal.dateComponents([.year, .month, .day, .hour, .minute], from: now)
         comps.second = 0
         var t = (cal.date(from: comps) ?? now).addingTimeInterval(60)
-        var iterations = 0
-        while runs.count < count, iterations < 366 * 24 * 60 {
-            iterations += 1
+        // Scan up to 8 years out: the worst gap to the next matching date for any
+        // satisfiable expression is a Feb-29 schedule across a non-leap century year
+        // (e.g. 2096-03-01 → 2104-02-29, just under 8 years). An empty result within
+        // this horizon therefore means the expression never fires.
+        let horizon = cal.date(byAdding: .year, value: 8, to: now) ?? now.addingTimeInterval(8 * 366 * 86_400)
+        while runs.count < count, t < horizon {
             let c = cal.dateComponents([.minute, .hour, .day, .month, .weekday], from: t)
             let wd = ((c.weekday ?? 1) - 1)   // Calendar 1=Sun → cron 0=Sun
             // Vixie cron: day-of-month and day-of-week are ORed when BOTH are restricted.
             let dayOK = (domRestricted && dowRestricted)
                 ? (days.contains(c.day ?? -1) || weekdays.contains(wd))
                 : (days.contains(c.day ?? -1) && weekdays.contains(wd))
-            if minutes.contains(c.minute ?? -1), hours.contains(c.hour ?? -1),
-               months.contains(c.month ?? -1), dayOK {
+            guard months.contains(c.month ?? -1), dayOK else {
+                // Nothing on this day can match — jump to the start of the next day.
+                t = cal.date(byAdding: .day, value: 1, to: cal.startOfDay(for: t)) ?? t.addingTimeInterval(86_400)
+                continue
+            }
+            if minutes.contains(c.minute ?? -1), hours.contains(c.hour ?? -1) {
                 runs.append(t)
             }
             t = t.addingTimeInterval(60)
@@ -114,7 +123,7 @@ public enum CronParser {
             else { bits.append("hour \(p[1])") }
         }
         let dows = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
-        func day(_ n: Int) -> String { (0..<7).contains(n) ? dows[n] : "\(n)" }
+        func day(_ n: Int) -> String { (0...7).contains(n) ? dows[n % 7] : "\(n)" }   // 7 = Sunday too
         if p[4] != "*" {
             if let dash = p[4].firstIndex(of: "-"), let a = Int(p[4][..<dash]), let b = Int(p[4][p[4].index(after: dash)...]) {
                 bits.append("\(day(a)) through \(day(b))")

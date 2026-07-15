@@ -22,6 +22,10 @@ public extension CronParser {
         public let description: String
 
         /// The next run times (up to 5), in ascending order.
+        ///
+        /// The scan covers the next 8 years — enough for any satisfiable schedule
+        /// (worst case: Feb 29 across a non-leap century year). Empty with a `nil`
+        /// ``error`` means the expression parses but never fires.
         public let nextRuns: [Date]
 
         /// An error message if the expression was invalid, otherwise `nil`.
